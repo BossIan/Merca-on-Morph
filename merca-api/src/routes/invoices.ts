@@ -1,0 +1,170 @@
+import { Router, Response } from 'express'
+import { db } from '../db/client'
+import jwt from 'jsonwebtoken'
+
+const router = Router()
+
+const authMiddleware = (req: any, res: Response, next: any) => {
+  const token = req.headers.authorization?.split(' ')[1]
+  if (!token) return res.status(401).json({ message: 'Unauthorized' })
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET || 'secret')
+    next()
+  } catch {
+    return res.status(401).json({ message: 'Invalid token' })
+  }
+}
+
+// POST /api/invoices — create invoice
+router.post('/', authMiddleware, async (req: any, res: Response) => {
+  const { customer_name, customer_email, amount, description, currency, due_date } = req.body
+
+  if (!customer_name || !customer_email || !amount || !due_date) {
+    return res.status(400).json({ message: 'Missing required fields' })
+  }
+
+  const fee = parseFloat((amount * 0.005).toFixed(2))
+  const net = parseFloat((amount - fee).toFixed(2))
+
+  try {
+    const [countRows] = await db.query(
+      'SELECT COUNT(*) as count FROM invoices WHERE user_id = ?',
+      [req.user.userId]
+    ) as any[]
+    const count = (countRows as any[])[0].count + 1
+    const invoice_number = `INV-${new Date().getFullYear()}-${String(count).padStart(3, '0')}`
+    const payment_link = `https://pay.merca.io/${invoice_number.toLowerCase()}`
+
+    await db.query(
+      `INSERT INTO invoices (id, invoice_number, user_id, customer_name, customer_email, amount, fee, net, description, currency, due_date, payment_link)
+       VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [invoice_number, req.user.userId, customer_name, customer_email, amount, fee, net, description, currency, due_date, payment_link]
+    )
+
+    const [rows] = await db.query(
+      'SELECT * FROM invoices WHERE invoice_number = ? AND user_id = ?',
+      [invoice_number, req.user.userId]
+    ) as any[]
+
+    return res.status(201).json((rows as any[])[0])
+  } catch (err) {
+    console.error('Invoice create error:', err)
+    return res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// GET /api/invoices — list all invoices for user (or filter by on_chain_id)
+router.get('/', authMiddleware, async (req: any, res: Response) => {
+  try {
+    const { on_chain_id } = req.query
+
+    if (on_chain_id) {
+      // Filter by on_chain_id
+      const [rows] = await db.query(
+        'SELECT * FROM invoices WHERE user_id = ? AND on_chain_id = ?',
+        [req.user.userId, on_chain_id]
+      ) as any[]
+      return res.json(rows)
+    }
+
+    // Return all invoices for user
+    const [rows] = await db.query(
+      'SELECT * FROM invoices WHERE user_id = ? ORDER BY created_at DESC',
+      [req.user.userId]
+    ) as any[]
+    return res.json(rows)
+  } catch (err) {
+    return res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// GET /api/invoices/:id — get single invoice
+router.get('/:id', authMiddleware, async (req: any, res: Response) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM invoices WHERE id = ? AND user_id = ?',
+      [req.params.id, req.user.userId]
+    ) as any[]
+    const invoice = (rows as any[])[0]
+    if (!invoice) return res.status(404).json({ message: 'Invoice not found' })
+    return res.json(invoice)
+  } catch (err) {
+    return res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// PATCH /api/invoices/:id — update on_chain_id after blockchain creation
+router.patch('/:id', authMiddleware, async (req: any, res: Response) => {
+  const { on_chain_id } = req.body
+
+  if (!on_chain_id) {
+    return res.status(400).json({ message: 'on_chain_id is required' })
+  }
+
+  try {
+    // Verify invoice belongs to this user
+    const [rows] = await db.query(
+      'SELECT * FROM invoices WHERE id = ? AND user_id = ?',
+      [req.params.id, req.user.userId]
+    ) as any[]
+
+    const invoice = (rows as any[])[0]
+    if (!invoice) return res.status(404).json({ message: 'Invoice not found' })
+
+    // Update on_chain_id and payment_link
+    const payment_link = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/pay/${on_chain_id}`
+
+    await db.query(
+      'UPDATE invoices SET on_chain_id = ?, payment_link = ? WHERE id = ? AND user_id = ?',
+      [on_chain_id, payment_link, req.params.id, req.user.userId]
+    )
+
+    const [updated] = await db.query(
+      'SELECT * FROM invoices WHERE id = ?',
+      [req.params.id]
+    ) as any[]
+
+    return res.json((updated as any[])[0])
+  } catch (err) {
+    console.error('Invoice patch error:', err)
+    return res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// POST /api/invoices/mark-paid/:on_chain_id — mark invoice as paid
+router.post('/mark-paid/:on_chain_id', authMiddleware, async (req: any, res: Response) => {
+  const { on_chain_id } = req.params
+
+  if (!on_chain_id) {
+    return res.status(400).json({ message: 'on_chain_id is required' })
+  }
+
+  try {
+    // Find invoice by on_chain_id and verify it belongs to this user
+    const [rows] = await db.query(
+      'SELECT * FROM invoices WHERE on_chain_id = ? AND user_id = ?',
+      [on_chain_id, req.user.userId]
+    ) as any[]
+
+    const invoice = (rows as any[])[0]
+    if (!invoice) return res.status(404).json({ message: 'Invoice not found' })
+
+    // Update paid_date to current timestamp
+    await db.query(
+      'UPDATE invoices SET paid_date = NOW() WHERE on_chain_id = ? AND user_id = ?',
+      [on_chain_id, req.user.userId]
+    )
+
+    const [updated] = await db.query(
+      'SELECT * FROM invoices WHERE on_chain_id = ?',
+      [on_chain_id]
+    ) as any[]
+
+    return res.json((updated as any[])[0])
+  } catch (err) {
+    console.error('Mark paid error:', err)
+    return res.status(500).json({ message: 'Server error' })
+  }
+})
+
+export default router
