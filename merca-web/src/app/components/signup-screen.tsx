@@ -7,7 +7,7 @@ import { useAccount, useDisconnect } from "wagmi";
 import { ImageWithFallback } from "./figma/ImageWithFallback";
 import mercaLogo from "../../imports/BestFloatCompetition.png";
 
-const API_URL = "http://localhost:3001";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
 
 export function SignupScreen() {
   const navigate = useNavigate();

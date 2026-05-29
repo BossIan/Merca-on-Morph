@@ -6,6 +6,7 @@ dotenv.config()
 export const db = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
+  port: Number(process.env.DB_PORT),
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'merca_isky',
   waitForConnections: true,
