@@ -1,82 +1,70 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useParams, useNavigate } from "react-router";
 import { CheckCircle, Loader2, AlertCircle, ArrowLeft, Wallet } from "lucide-react";
-import { useAccount, useConnect } from "wagmi";
-import { useInvoice, useMercaInvoice } from "../../hooks/useMercaInvoice";
+import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { useInvoice } from "../../hooks/useMercaInvoice";
 import { ConnectWallet } from "./ConnectWallet";
-import { CONTRACTS, ERC20_ABI } from "../../lib/merca-config";
-import { useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { CONTRACTS, INVOICE_ABI, ERC20_ABI, USDC_DECIMALS } from "../../lib/merca-config";
 
 export function CustomerPayment() {
   const { invoiceId } = useParams<{ invoiceId: string }>();
   const navigate = useNavigate();
+  const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
   const { address, isConnected } = useAccount();
 
   const { invoice, isLoading } = useInvoice(
     invoiceId as `0x${string}` | undefined
   );
 
+  // Direct Payment Hooks & States
   const { writeContractAsync } = useWriteContract();
-  const [approveTxHash, setApproveTxHash] = useState<`0x${string}` | undefined>();
   const [payTxHash, setPayTxHash] = useState<`0x${string}` | undefined>();
   const [step, setStep] = useState<"idle" | "approving" | "paying" | "done">("idle");
   const [error, setError] = useState("");
-
-  const { isSuccess: approveSuccess } = useWaitForTransactionReceipt({ hash: approveTxHash });
-  const { isSuccess: paySuccess } = useWaitForTransactionReceipt({ hash: payTxHash });
-
-  // Auto-pay after approval confirms
-  useEffect(() => {
-    if (approveSuccess && step === "approving") {
-      executePay();
-    }
-  }, [approveSuccess]);
-
-  useEffect(() => {
-    if (paySuccess) setStep("done");
-  }, [paySuccess]);
+  const [gasEstimate, setGasEstimate] = useState<string>("");
 
   async function handlePay() {
     if (!address || !invoice || !invoiceId) return;
     setError("");
+    setStep("approving");
 
     try {
-      // Step 1: Approve USDC
-      setStep("approving");
-      const approveHash = await writeContractAsync({
+      // Step 1: Approve USDC spending
+      console.log("Step 1: Approving USDC spending...");
+      const approveTx = await writeContractAsync({
         address: CONTRACTS.USDC,
         abi: ERC20_ABI,
         functionName: "approve",
-        args: [CONTRACTS.MERCA_INVOICE, invoice.amountRaw],
+        args: [CONTRACTS.MERCA_INVOICE, BigInt(invoice.amountRaw)],
       });
-      setApproveTxHash(approveHash);
-    } catch (err: any) {
-      setError(err?.shortMessage ?? err?.message ?? "Transaction failed");
-      setStep("idle");
-    }
-  }
 
-  async function executePay() {
-    if (!invoiceId) return;
-    try {
+      console.log("Step 2: Calling payInvoice...");
       setStep("paying");
-      const payHash = await writeContractAsync({
+
+      // Step 2: Pay invoice
+      const payTx = await writeContractAsync({
         address: CONTRACTS.MERCA_INVOICE,
-        abi: [
-          {
-            name: "payInvoice",
-            type: "function",
-            stateMutability: "nonpayable",
-            inputs: [{ name: "id", type: "bytes32" }],
-            outputs: [],
-          },
-        ] as const,
+        abi: INVOICE_ABI,
         functionName: "payInvoice",
         args: [invoiceId as `0x${string}`],
       });
-      setPayTxHash(payHash);
+
+      setPayTxHash(payTx);
+      
+      // Notify backend of payment
+      await fetch(`${API_URL}/api/invoices/confirm-payment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          invoiceId: invoiceId,
+          txHash: payTx,
+          fromAddress: address,
+        }),
+      }).catch(err => console.error("Backend notification failed:", err));
+
+      setStep("done");
     } catch (err: any) {
       setError(err?.shortMessage ?? err?.message ?? "Payment failed");
       setStep("idle");
@@ -109,8 +97,8 @@ export function CustomerPayment() {
             </a>
           )}
           <div className="bg-[#E8F5E0] rounded-xl p-4 mb-6">
-            <p className="text-xs text-[#6B6B6B] mb-1">Settlement</p>
-            <p className="text-sm font-bold text-[#328100]">⚡ Instant on Morph</p>
+            <p className="text-xs text-[#6B6B6B] mb-1">Payment Details</p>
+            <p className="text-sm font-bold text-[#328100]">✓ Direct On-Chain Payment</p>
           </div>
           <button
             onClick={() => navigate("/")}
@@ -217,8 +205,8 @@ export function CustomerPayment() {
             </div>
           )}
           <div className="flex justify-between text-sm pt-2 border-t border-[#F5F5F5]">
-            <span className="text-[#6B6B6B]">Settlement</span>
-            <span className="font-medium text-[#328100]">⚡ Instant on Morph</span>
+            <span className="text-[#6B6B6B]">Gas Fee</span>
+            <span className="font-medium text-[#1F1F1F]">Network dependent</span>
           </div>
         </div>
 
@@ -248,12 +236,12 @@ export function CustomerPayment() {
               <Loader2 className="w-5 h-5 text-[#328100] animate-spin flex-shrink-0" />
               <div>
                 <p className="text-sm font-medium text-[#328100]">
-                  {step === "approving" ? "Step 1/2: Approving USDC..." : "Step 2/2: Sending payment..."}
+                  {step === "approving" ? "Step 1/2: Approving USDC..." : "Step 2/2: Processing Payment..."}
                 </p>
                 <p className="text-xs text-[#6B6B6B]">
                   {step === "approving"
-                    ? "Confirm in MetaMask to allow USDC spending"
-                    : "Confirm in MetaMask to send payment"}
+                    ? "Approve the transaction in your wallet."
+                    : "Confirming payment on the blockchain..."}
                 </p>
               </div>
             </div>

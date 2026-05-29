@@ -328,16 +328,7 @@ export function InvoiceDetail() {
                 </span>
               </div>
             )}
-            {invoice?.status === "Paid" && (
-              <div className="flex justify-between">
-                <span className="text-[#6B6B6B]">Paid Date</span>
-                <span className="font-medium text-[#328100]">
-                  {new Date(backendInvoice.paid_date).toLocaleDateString("en-US", {
-                    month: "short", day: "numeric", year: "numeric"
-                  })}
-                </span>
-              </div>
-            )}
+  
             <div className="flex justify-between">
               <span className="text-[#6B6B6B]">Currency</span>
               <span className="font-medium text-[#1F1F1F]">USDC</span>

@@ -1,9 +1,25 @@
 import { Router, Response } from 'express'
 import { db } from '../db/client'
 import jwt from 'jsonwebtoken'
+import { ethers } from "ethers";
 
 const router = Router()
 
+// Ethers Configuration Constants
+const mercaInvoiceAbi = [
+  "function payInvoice(bytes32 id) external"
+];
+
+const usdcAbi = [
+  "function receiveWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
+  "function approve(address spender, uint256 amount) external returns (bool)",
+  "function balanceOf(address account) external view returns (uint256)"
+];
+
+const provider = new ethers.JsonRpcProvider(process.env.RPC_URL || "https://rpc-quickstart.morphl2.io");
+const relayerWallet = new ethers.Wallet(process.env.MERCA_PRIVATE_KEY!, provider);
+
+// Auth Middleware for Merchant Dashboards
 const authMiddleware = (req: any, res: Response, next: any) => {
   const token = req.headers.authorization?.split(' ')[1]
   if (!token) return res.status(401).json({ message: 'Unauthorized' })
@@ -59,7 +75,6 @@ router.get('/', authMiddleware, async (req: any, res: Response) => {
     const { on_chain_id } = req.query
 
     if (on_chain_id) {
-      // Filter by on_chain_id
       const [rows] = await db.query(
         'SELECT * FROM invoices WHERE user_id = ? AND on_chain_id = ?',
         [req.user.userId, on_chain_id]
@@ -67,7 +82,6 @@ router.get('/', authMiddleware, async (req: any, res: Response) => {
       return res.json(rows)
     }
 
-    // Return all invoices for user
     const [rows] = await db.query(
       'SELECT * FROM invoices WHERE user_id = ? ORDER BY created_at DESC',
       [req.user.userId]
@@ -102,7 +116,6 @@ router.patch('/:id', authMiddleware, async (req: any, res: Response) => {
   }
 
   try {
-    // Verify invoice belongs to this user
     const [rows] = await db.query(
       'SELECT * FROM invoices WHERE id = ? AND user_id = ?',
       [req.params.id, req.user.userId]
@@ -111,7 +124,6 @@ router.patch('/:id', authMiddleware, async (req: any, res: Response) => {
     const invoice = (rows as any[])[0]
     if (!invoice) return res.status(404).json({ message: 'Invoice not found' })
 
-    // Update on_chain_id and payment_link
     const payment_link = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/pay/${on_chain_id}`
 
     await db.query(
@@ -131,7 +143,7 @@ router.patch('/:id', authMiddleware, async (req: any, res: Response) => {
   }
 })
 
-// POST /api/invoices/mark-paid/:on_chain_id — mark invoice as paid
+// POST /api/invoices/mark-paid/:on_chain_id — mark invoice as paid manually
 router.post('/mark-paid/:on_chain_id', authMiddleware, async (req: any, res: Response) => {
   const { on_chain_id } = req.params
 
@@ -140,7 +152,6 @@ router.post('/mark-paid/:on_chain_id', authMiddleware, async (req: any, res: Res
   }
 
   try {
-    // Find invoice by on_chain_id and verify it belongs to this user
     const [rows] = await db.query(
       'SELECT * FROM invoices WHERE on_chain_id = ? AND user_id = ?',
       [on_chain_id, req.user.userId]
@@ -149,7 +160,6 @@ router.post('/mark-paid/:on_chain_id', authMiddleware, async (req: any, res: Res
     const invoice = (rows as any[])[0]
     if (!invoice) return res.status(404).json({ message: 'Invoice not found' })
 
-    // Update paid_date to current timestamp
     await db.query(
       'UPDATE invoices SET paid_date = NOW() WHERE on_chain_id = ? AND user_id = ?',
       [on_chain_id, req.user.userId]
@@ -167,4 +177,102 @@ router.post('/mark-paid/:on_chain_id', authMiddleware, async (req: any, res: Res
   }
 })
 
-export default router
+// POST /api/invoices/pay-gasless
+router.post("/pay-gasless", async (req: any, res: Response) => {
+  const {
+    invoiceId,
+    fromAddress,
+    amount,
+    validAfter,
+    validBefore,
+    nonce,
+    signature
+  } = req.body;
+
+  try {
+    const flatUuid = invoiceId.replace(/-/g, "").replace(/^0x/, "");
+    const bytes32InvoiceId = `0x${flatUuid}`;
+    const cleanNonce = nonce.startsWith("0x") ? nonce : `0x${nonce}`;
+    const sigComponents = ethers.Signature.from(signature);
+
+    // 1. Create a contract instance for the USDC Token directly
+    const usdcAbi = [
+      "function receiveWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external",
+      "function approve(address spender, uint256 amount) external returns (bool)"
+    ];
+    const usdcContract = new ethers.Contract(process.env.USDC_MORPH!, usdcAbi, relayerWallet);
+
+    // 2. Create the standard Invoice contract instance
+    const invoiceContract = new ethers.Contract(process.env.MERCA_INVOICE!, mercaInvoiceAbi, relayerWallet);
+
+    console.log("Step 1: Pulling USDC from customer to relayer wallet...");
+    const relayerAddress = await relayerWallet.getAddress();
+    
+    const pullTx = await usdcContract.receiveWithAuthorization(
+      fromAddress,
+      relayerAddress, // Must match the 'to' field signed on the frontend
+      BigInt(amount),
+      BigInt(validAfter),
+      BigInt(validBefore),
+      cleanNonce,
+      sigComponents.v,
+      sigComponents.r,
+      sigComponents.s
+    );
+    await pullTx.wait();
+
+    console.log("Step 2: Approving MercaInvoice contract to spend relayer's new USDC...");
+    const approveTx = await usdcContract.approve(process.env.MERCA_INVOICE!, BigInt(amount));
+    await approveTx.wait();
+
+    console.log("Step 3: Settling the invoice via the native payInvoice function...");
+    // 💡 Calling the standard payInvoice from the relayer wallet!
+    const payTx = await invoiceContract.payInvoice(bytes32InvoiceId);
+    const receipt = await payTx.wait();
+
+    // 4. Update Database
+    await db.query(
+      "UPDATE invoices SET paid_date = NOW() WHERE id = ?",
+      [invoiceId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      txHash: receipt?.hash
+    });
+
+  } catch (error: any) {
+    console.error("Relayer fallback failure:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Gasless routing pipeline failed"
+    });
+  }
+});
+
+// POST /api/invoices/confirm-payment — confirm direct payment
+router.post("/confirm-payment", async (req: any, res: Response) => {
+  const { invoiceId, txHash, fromAddress } = req.body;
+
+  try {
+    // Update invoice to paid status
+    await db.query(
+      "UPDATE invoices SET paid_date = NOW(), status = 'Paid' WHERE id = ?",
+      [invoiceId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment confirmed",
+      txHash: txHash
+    });
+  } catch (error: any) {
+    console.error("Payment confirmation error:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Failed to confirm payment"
+    });
+  }
+});
+
+export default router;

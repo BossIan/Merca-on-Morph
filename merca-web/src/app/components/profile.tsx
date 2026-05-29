@@ -152,16 +152,7 @@ export function Profile() {
             <ChevronRight className="w-5 h-5 text-[#6B6B6B]" />
           </button>
 
-          <button className="w-full px-5 py-4 flex items-center gap-4 hover:bg-[#F5F5F5] transition-colors border-t border-[#F5F5F5]">
-            <Phone className="w-5 h-5 text-[#6B6B6B]" />
-            <div className="flex-1 text-left">
-              <p className="text-sm text-[#6B6B6B]">Phone</p>
-              <p className={`font-medium ${userInfo.phone === "—" ? "text-[#6B6B6B] italic text-sm" : "text-[#1F1F1F]"}`}>
-                {userInfo.phone === "—" ? "— pending backend —" : userInfo.phone}
-              </p>
-            </div>
-            <ChevronRight className="w-5 h-5 text-[#6B6B6B]" />
-          </button>
+      
         </div>
 
         {/* Settings */}
