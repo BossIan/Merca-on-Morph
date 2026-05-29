@@ -73,6 +73,7 @@ router.post('/', authMiddleware, async (req: any, res: Response) => {
 router.get('/', authMiddleware, async (req: any, res: Response) => {
   try {
     const { on_chain_id } = req.query
+    console.log("GET /invoices - userId:", req.user.userId, "on_chain_id:", on_chain_id);
 
     if (on_chain_id) {
       const [rows] = await db.query(
@@ -83,12 +84,14 @@ router.get('/', authMiddleware, async (req: any, res: Response) => {
     }
 
     const [rows] = await db.query(
-      'SELECT * FROM invoices WHERE user_id = ? ORDER BY created_at DESC',
+      'SELECT * FROM invoices WHERE user_id = ?',
       [req.user.userId]
     ) as any[]
+    console.log("Returned invoices count:", (rows as any[]).length);
     return res.json(rows)
-  } catch (err) {
-    return res.status(500).json({ message: 'Server error' })
+  } catch (err: any) {
+    console.error("GET /invoices error:", err.message, err.stack);
+    return res.status(500).json({ message: 'Server error', error: err.message })
   }
 })
 

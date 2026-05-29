@@ -47,6 +47,7 @@ export function InvoiceList() {
   const navigate = useNavigate();
   const { address, isConnected } = useAccount();
   const publicClient = usePublicClient();
+  const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
 
   const [invoices,  setInvoices]  = useState<InvoiceItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -66,14 +67,15 @@ export function InvoiceList() {
   useEffect(() => {
     if (!invoiceIds || !publicClient || invoiceIds.length === 0) return;
     fetchInvoices();
-  }, [invoiceIds, publicClient]);
+  }, [invoiceIds, publicClient, address]);
 
   async function fetchInvoices() {
-    if (!invoiceIds || !publicClient) return;
+    if (!invoiceIds || !publicClient || !address) return;
     setIsLoading(true);
 
     try {
-      const results = await Promise.all(
+      // Fetch on-chain invoice data
+      const onChainResults = await Promise.all(
         invoiceIds.map((id) =>
           publicClient.readContract({
             address: CONTRACTS.MERCA_INVOICE,
@@ -84,20 +86,35 @@ export function InvoiceList() {
         )
       );
 
-      const items: InvoiceItem[] = results.map((inv, i) => ({
-        id:         invoiceIds[i] as string,
-        amount:     formatUSDC(inv.amount),
-        status:     STATUS_MAP[inv.status] ?? "Pending",
-        description: inv.description || "No description",
-        createdAt:  new Date(Number(inv.createdAt) * 1000),
-        expiresAt:  inv.expiresAt > 0n
-                      ? new Date(Number(inv.expiresAt) * 1000)
-                      : null,
-        // ⚠️ TODO: Replace with real data from backend API
-        customerName:    "— pending backend —",
-        customerEmail:   "— pending backend —",
-        referenceNumber: `INV-${String(i + 1).padStart(3, "0")}`,
-      }));
+      // Fetch backend invoice data (includes customer name/email)
+      const backendResponse = await fetch(`${API_URL}/api/invoices`, {
+        headers: {
+          "Authorization": `Bearer ${localStorage.getItem("token") || ""}`,
+        },
+      });
+      
+      const backendInvoices = backendResponse.ok ? await backendResponse.json() : [];
+
+      const backendMap = new Map(
+        backendInvoices.map((inv: any) => [inv.on_chain_id, inv])
+      );
+      const items: InvoiceItem[] = onChainResults.map((inv, i) => {
+        const onChainId = invoiceIds[i] as string;
+        const backendData = backendMap.get(onChainId) || {};
+        return {
+          id:         onChainId,
+          amount:     formatUSDC(inv.amount),
+          status:     STATUS_MAP[inv.status] ?? "Pending",
+          description: inv.description || "No description",
+          createdAt:  new Date(Number(inv.createdAt) * 1000),
+          expiresAt:  inv.expiresAt > 0n
+                        ? new Date(Number(inv.expiresAt) * 1000)
+                        : null,
+          customerName:   backendData.customer_name || "—",
+          customerEmail:  backendData.customer_email || "—",
+          referenceNumber: backendData.invoice_number || `INV-${String(i + 1).padStart(3, "0")}`,
+        };
+      });
 
       // Newest first
       setInvoices(items.reverse());
@@ -248,7 +265,6 @@ export function InvoiceList() {
             </div>
 
             <div className="border-t border-[#F5F5F5] pt-3 space-y-1.5">
-              {/* ⚠️ Customer name — replace with backend data */}
               <div className="flex justify-between text-sm">
                 <span className="text-[#6B6B6B]">Customer</span>
                 <span className="text-[#6B6B6B] italic text-xs">
