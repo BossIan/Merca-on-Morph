@@ -305,7 +305,7 @@ export function InvoiceDetail() {
             <div className="flex justify-between">
               <span className="text-[#6B6B6B]">Description</span>
               <span className="font-medium text-[#1F1F1F] text-right max-w-[55%]">
-                {invoice?.description}
+                {backendInvoice?.description}
               </span>
             </div>
             <div className="flex justify-between">

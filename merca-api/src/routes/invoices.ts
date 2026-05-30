@@ -48,8 +48,10 @@ router.post('/', authMiddleware, async (req: any, res: Response) => {
       [req.user.userId]
     ) as any[]
     const count = (countRows as any[])[0].count + 1
-    const invoice_number = `INV-${new Date().getFullYear()}-${String(count).padStart(3, '0')}`
-    const payment_link = `https://pay.merca.io/${invoice_number.toLowerCase()}`
+    const year = new Date().getFullYear()
+    const timestamp = Date.now().toString().slice(-4)
+    const invoice_number = `INV-${year}-${String(count).padStart(3, '0')}-${timestamp}`
+    const payment_link = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/pay/pending`
 
     await db.query(
       `INSERT INTO invoices (id, invoice_number, user_id, customer_name, customer_email, amount, fee, net, description, currency, due_date, payment_link)
@@ -210,7 +212,7 @@ router.post("/pay-gasless", async (req: any, res: Response) => {
 
     console.log("Step 1: Pulling USDC from customer to relayer wallet...");
     const relayerAddress = await relayerWallet.getAddress();
-    
+
     const pullTx = await usdcContract.receiveWithAuthorization(
       fromAddress,
       relayerAddress, // Must match the 'to' field signed on the frontend
